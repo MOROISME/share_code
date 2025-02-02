@@ -1,0 +1,137 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Microsoft.Build.Locator;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.FindSymbols;
+using Microsoft.CodeAnalysis.VisualBasic;
+
+class Program
+{
+    static async Task Main(string[] args)
+    {
+        // ソリューションのパスを指定 (適宜変更)
+        string solutionPath = @"C:\Users\m2fmh\Desktop\DataPerpustakaan-main\DataPerpustakaan-main\DataPerpustakaan.sln";
+
+        // MSBuild の登録
+        MSBuildLocator.RegisterDefaults();
+
+        using var workspace = MSBuildWorkspace.Create();
+        Console.WriteLine("ソリューションを読み込み中...");
+
+        // ソリューションを開く
+        var solution = await workspace.OpenSolutionAsync(solutionPath);
+
+        // 解析開始
+        await AnalyzeSolution(solution);
+    }
+
+    static async Task AnalyzeSolution(Solution solution)
+    {
+        var methodReferences = new Dictionary<string, int>();
+
+        foreach (var project in solution.Projects)
+        {
+            if (project.Language != LanguageNames.VisualBasic)
+                continue;
+
+            Console.WriteLine($"プロジェクト解析中: {project.Name}");
+
+            string projectDir = Path.GetDirectoryName(project.FilePath) ?? "";
+
+            foreach (var document in project.Documents)
+            {
+                var syntaxTree = await document.GetSyntaxTreeAsync();
+                var semanticModel = await document.GetSemanticModelAsync();
+
+                if (syntaxTree == null || semanticModel == null)
+                    continue;
+
+                var root = await syntaxTree.GetRootAsync();
+                var methodSymbols = root.DescendantNodes()
+                    .OfType<Microsoft.CodeAnalysis.VisualBasic.Syntax.MethodStatementSyntax>()
+                    .Select(node => semanticModel.GetDeclaredSymbol(node))
+                    .Where(symbol => symbol != null)
+                    .Cast<IMethodSymbol>();
+
+                foreach (var methodSymbol in methodSymbols)
+                {
+                    // ファイルの相対パスを考慮したメソッド識別子を作成
+                    var methodIdentifier = GetMethodIdentifier(methodSymbol, document.FilePath, projectDir);
+
+                    var references = await SymbolFinder.FindReferencesAsync(methodSymbol, solution);
+                    int count = references.Sum(r => r.Locations.Count());
+
+                    if (methodReferences.ContainsKey(methodIdentifier))
+                    {
+                        methodReferences[methodIdentifier] += count;
+                    }
+                    else
+                    {
+                        methodReferences[methodIdentifier] = count;
+                    }
+                }
+            }
+        }
+
+        string solutionDir = Path.GetDirectoryName(solution.FilePath) ?? "";
+        await AnalyzeAspxFiles(solutionDir, methodReferences);
+
+        var filteredMethodReferences = methodReferences
+            .Where(kvp => kvp.Value > 0)
+            .OrderByDescending(kvp => kvp.Value)
+            .ToList();
+
+        Console.WriteLine("\nメソッド参照回数:");
+        foreach (var kvp in filteredMethodReferences)
+        {
+            Console.WriteLine($"{kvp.Key}: {kvp.Value} 回");
+        }
+
+        File.WriteAllLines("MethodReferences.csv", filteredMethodReferences.Select(kvp => $"{kvp.Key},{kvp.Value}"));
+        Console.WriteLine("\nCSV ファイルに出力しました: MethodReferences.csv");
+    }
+
+    static string GetMethodIdentifier(IMethodSymbol methodSymbol, string filePath, string projectDir)
+    {
+        // メソッド名と引数の型を使ってユニークな識別子を作成
+        var argumentTypes = string.Join(",", methodSymbol.Parameters.Select(p => p.Type.ToDisplayString()));
+
+        // プロジェクトフォルダからの相対パスを取得
+        string relativeFilePath = Path.GetRelativePath(projectDir, filePath).Replace("\\", "/");
+
+        // ファイルのディレクトリ情報を識別子に含める
+        return $"{methodSymbol.ContainingType.ToDisplayString()}.{methodSymbol.Name}({argumentTypes}): {relativeFilePath}";
+    }
+
+    static async Task AnalyzeAspxFiles(string solutionDirectory, Dictionary<string, int> methodReferences)
+    {
+        var aspxFiles = Directory.GetFiles(solutionDirectory, "*.aspx", SearchOption.AllDirectories);
+
+        foreach (var file in aspxFiles)
+        {
+            string content = await File.ReadAllTextAsync(file);
+
+            // <% %> 内のコードを抽出
+            var matches = Regex.Matches(content, "<%([^%]+)%>");
+
+            foreach (Match match in matches)
+            {
+                string codeBlock = match.Groups[1].Value;
+
+                // 既存のメソッドリストにあるものを探す
+                foreach (var method in methodReferences.Keys.ToList())
+                {
+                    if (codeBlock.Contains(method))
+                    {
+                        methodReferences[method]++;  // 呼び出し回数を加算
+                    }
+                }
+            }
+        }
+    }
+}
