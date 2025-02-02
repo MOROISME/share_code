@@ -1,3 +1,11 @@
+c# console app !! not .netframework !! 
+
+Microsoft.Build.Locator
+Microsoft.CodeAnalysis.CSharp.Workspaces
+Microsoft.CodeAnalysis.VisualBasic.Workspaces
+Microsoft.CodeAnalysis.Workspaces.MSBuild
+System.Composition.Hosting
+
 using System;
 using System.Collections.Generic;
 using System.IO;
