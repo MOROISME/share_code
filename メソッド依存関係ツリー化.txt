@@ -1,0 +1,92 @@
+Microsoft.Build.Locator
+Microsoft.CodeAnalysis
+Microsoft.CodeAnalysis.CSharp.Workspaces
+Microsoft.CodeAnalysis.VisualBasic.Workspaces
+Microsoft.CodeAnalysis.Workspaces.MSBuild
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.FindSymbols;
+
+class Program
+{
+    static async Task Main()
+    {
+        string solutionPath = @"C:\Users\m2fmh\Desktop\DataPerpustakaan-main\DataPerpustakaan-main\DataPerpustakaan.sln"; // ソリューションのパス
+
+        using var workspace = MSBuildWorkspace.Create();
+        Console.WriteLine("ソリューションを開いています...");
+        Solution solution = await workspace.OpenSolutionAsync(solutionPath);
+        Console.WriteLine("解析を開始...");
+
+        Dictionary<string, List<string>> methodCalls = new(); // メソッドの呼び出し関係を保存
+
+        foreach (var project in solution.Projects)
+        {
+            Console.WriteLine($"プロジェクト: {project.Name}");
+
+            var symbols = await SymbolFinder.FindSourceDeclarationsAsync(project, _ => true);
+            foreach (var symbol in symbols.OfType<IMethodSymbol>())
+            {
+                string callerMethod = $"{symbol.ContainingType.Name}.{symbol.Name}";
+
+                var references = await SymbolFinder.FindReferencesAsync(symbol, solution);
+                foreach (var reference in references)
+                {
+                    foreach (var location in reference.Locations)
+                    {
+                        var doc = location.Document;
+                        var semanticModel = await doc.GetSemanticModelAsync();
+                        if (semanticModel == null) continue;
+
+                        var root = await doc.GetSyntaxRootAsync();
+                        var node = root?.FindNode(location.Location.SourceSpan);
+                        if (node == null) continue;
+
+                        var enclosingMethod = semanticModel.GetEnclosingSymbol(location.Location.SourceSpan.Start) as IMethodSymbol;
+                        if (enclosingMethod == null) continue;
+
+                        string parentMethod = $"{enclosingMethod.ContainingType.Name}.{enclosingMethod.Name}";
+
+                        if (!methodCalls.ContainsKey(parentMethod))
+                            methodCalls[parentMethod] = new List<string>();
+
+                        methodCalls[parentMethod].Add(callerMethod);
+                    }
+                }
+            }
+        }
+
+        Console.WriteLine("解析終了\n");
+
+        // ルートメソッド（呼び出される側にないメソッド）を特定
+        var allMethods = new HashSet<string>(methodCalls.Keys.Concat(methodCalls.Values.SelectMany(x => x)));
+        var rootMethods = allMethods.Except(methodCalls.Values.SelectMany(x => x)).ToList();
+
+        // ツリー形式で出力
+        foreach (var root in rootMethods)
+        {
+            PrintTree(root, methodCalls, 0, new HashSet<string>());
+        }
+    }
+
+    static void PrintTree(string method, Dictionary<string, List<string>> methodCalls, int depth, HashSet<string> visited)
+    {
+        if (visited.Contains(method)) return; // 無限ループ防止
+        visited.Add(method);
+
+        Console.WriteLine(new string(' ', depth * 2) + "├── " + method);
+
+        if (methodCalls.ContainsKey(method))
+        {
+            foreach (var child in methodCalls[method])
+            {
+                PrintTree(child, methodCalls, depth + 1, visited);
+            }
+        }
+    }
+}
