@@ -1,0 +1,96 @@
+Microsoft.Build.Locator
+Microsoft.CodeAnalysis
+Microsoft.CodeAnalysis.CSharp.Workspaces
+Microsoft.CodeAnalysis.VisualBasic.Workspaces
+Microsoft.CodeAnalysis.Workspaces.MSBuild
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.FindSymbols;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
+class Program
+{
+    static async Task Main()
+    {
+        string solutionPath = @"C:\Users\m2fmh\Desktop\DataPerpustakaan-main\DataPerpustakaan-main\DataPerpustakaan.sln"; // ソリューションのパスに変更
+
+        using var workspace = MSBuildWorkspace.Create();
+        Console.WriteLine("ソリューションを開いています...");
+        Solution solution = await workspace.OpenSolutionAsync(solutionPath);
+        Console.WriteLine("解析を開始...");
+
+        Dictionary<string, List<string>> methodReferences = new();
+
+        foreach (var project in solution.Projects)
+        {
+            Console.WriteLine($"プロジェクト: {project.Name}");
+
+            var compilation = await project.GetCompilationAsync();
+            if (compilation == null) continue;
+
+            foreach (var document in project.Documents)
+            {
+                var syntaxRoot = await document.GetSyntaxRootAsync();
+                if (syntaxRoot == null) continue;
+
+                var semanticModel = await document.GetSemanticModelAsync();
+                if (semanticModel == null) continue;
+
+                var methodDeclarations = syntaxRoot.DescendantNodes().OfType<MethodDeclarationSyntax>();
+
+                foreach (var methodDeclaration in methodDeclarations)
+                {
+                    var methodSymbol = semanticModel.GetDeclaredSymbol(methodDeclaration) as IMethodSymbol;
+                    if (methodSymbol == null) continue;
+
+                    string methodName = $"{methodSymbol.ContainingType.Name}.{methodSymbol.Name}";
+                    string methodBody = methodDeclaration.ToFullString(); // メソッド全体のコードを取得
+
+                    // `resume` が含まれている場合はスキップ（大文字小文字を区別しない）
+                    if (methodBody.IndexOf("resume", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    var references = await SymbolFinder.FindReferencesAsync(methodSymbol, solution);
+
+                    if (!methodReferences.ContainsKey(methodName))
+                        methodReferences[methodName] = new List<string>();
+
+                    foreach (var reference in references)
+                    {
+                        foreach (var location in reference.Locations)
+                        {
+                            string callerInfo = $"{location.Document.FilePath} (行: {location.Location.GetLineSpan().StartLinePosition.Line})";
+                            methodReferences[methodName].Add(callerInfo);
+                        }
+                    }
+
+                    // 参照が 0 件の場合でもリストに追加（空のリストを保持）
+                    if (methodReferences[methodName].Count == 0)
+                    {
+                        methodReferences[methodName].Add("（参照なし）");
+                    }
+                }
+            }
+        }
+
+        Console.WriteLine("解析終了\n");
+        PrintTree(methodReferences);
+    }
+
+    static void PrintTree(Dictionary<string, List<string>> methodReferences)
+    {
+        foreach (var method in methodReferences)
+        {
+            Console.WriteLine(method.Key);
+            foreach (var caller in method.Value)
+            {
+                Console.WriteLine($"  ├── {caller}");
+            }
+        }
+    }
+}
